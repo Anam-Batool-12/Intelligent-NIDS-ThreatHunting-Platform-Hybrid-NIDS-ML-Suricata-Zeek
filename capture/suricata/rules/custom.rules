@@ -1,0 +1,80 @@
+# =========================================================================
+# Custom Suricata Detection Rules
+# Intelligent NIDS & Threat Hunting Platform
+# =========================================================================
+# Rule format: action proto src_ip src_port -> dst_ip dst_port (options)
+# SIDs 9000000+ reserved for this project's custom rules (avoid clashing
+# with Emerging Threats ruleset SIDs).
+# =========================================================================
+
+# --------------------------
+# DoS / Flood Detection
+# --------------------------
+alert tcp any any -> $HOME_NET any (msg:"CUSTOM DoS SYN Flood Detected"; \
+    flags:S; threshold:type both, track by_src, count 100, seconds 5; \
+    classtype:attempted-dos; sid:9000001; rev:1;)
+
+alert icmp any any -> $HOME_NET any (msg:"CUSTOM ICMP Flood Detected"; \
+    itype:8; threshold:type both, track by_src, count 50, seconds 5; \
+    classtype:attempted-dos; sid:9000002; rev:1;)
+
+alert udp any any -> $HOME_NET any (msg:"CUSTOM UDP Flood Detected"; \
+    threshold:type both, track by_src, count 200, seconds 5; \
+    classtype:attempted-dos; sid:9000003; rev:1;)
+
+# --------------------------
+# Port Scan Detection
+# --------------------------
+alert tcp any any -> $HOME_NET any (msg:"CUSTOM Possible Port Scan (many ports, single source)"; \
+    flags:S; flow:stateless; \
+    threshold:type both, track by_src, count 20, seconds 10; \
+    classtype:network-scan; sid:9000010; rev:1;)
+
+alert tcp any any -> $HOME_NET any (msg:"CUSTOM NULL Scan Detected"; \
+    flags:0; classtype:network-scan; sid:9000011; rev:1;)
+
+alert tcp any any -> $HOME_NET any (msg:"CUSTOM XMAS Scan Detected"; \
+    flags:FPU; classtype:network-scan; sid:9000012; rev:1;)
+
+# --------------------------
+# Brute Force Detection (SSH / FTP / HTTP auth)
+# --------------------------
+alert tcp any any -> $HOME_NET 22 (msg:"CUSTOM Possible SSH Brute Force"; \
+    flags:S; threshold:type both, track by_src, count 10, seconds 60; \
+    classtype:attempted-recon; sid:9000020; rev:1;)
+
+alert tcp any any -> $HOME_NET 21 (msg:"CUSTOM Possible FTP Brute Force"; \
+    flags:S; threshold:type both, track by_src, count 10, seconds 60; \
+    classtype:attempted-recon; sid:9000021; rev:1;)
+
+alert http any any -> $HOME_NET any (msg:"CUSTOM Possible HTTP Login Brute Force"; \
+    http.uri; content:"login"; nocase; \
+    threshold:type both, track by_src, count 15, seconds 60; \
+    classtype:attempted-recon; sid:9000022; rev:1;)
+
+# --------------------------
+# SQL Injection Detection (HTTP layer)
+# --------------------------
+alert http any any -> $HOME_NET any (msg:"CUSTOM SQLi Attempt - UNION SELECT"; \
+    http.uri; content:"UNION"; nocase; content:"SELECT"; nocase; distance:0; \
+    classtype:web-application-attack; sid:9000030; rev:1;)
+
+alert http any any -> $HOME_NET any (msg:"CUSTOM SQLi Attempt - OR 1=1"; \
+    http.uri; pcre:"/(\%27)|(\')|(\-\-)|(\%23)|(#)/i"; \
+    classtype:web-application-attack; sid:9000031; rev:1;)
+
+alert http any any -> $HOME_NET any (msg:"CUSTOM SQLi Attempt - Comment / Tautology"; \
+    http.uri; content:"OR"; nocase; content:"="; distance:0; \
+    classtype:web-application-attack; sid:9000032; rev:1;)
+
+# --------------------------
+# DNS Tunneling Indicators
+# --------------------------
+alert dns any any -> any any (msg:"CUSTOM DNS Query - Abnormally Long Hostname (possible tunneling)"; \
+    dns.query; pcre:"/^.{60,}$/"; \
+    classtype:policy-violation; sid:9000040; rev:1;)
+
+alert dns any any -> any any (msg:"CUSTOM DNS TXT Record Query Flood (possible tunneling)"; \
+    dns.query; content:"TXT"; nocase; \
+    threshold:type both, track by_src, count 30, seconds 60; \
+    classtype:policy-violation; sid:9000041; rev:1;)
