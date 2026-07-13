@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: nids-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    networks:
+      - nids-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.14.0
+    container_name: nids-logstash
+    volumes:
+      - ./pipeline/logstash:/usr/share/logstash/pipeline
+      - /var/log/suricata:/var/log/suricata:ro
+      - /opt/zeek/logs/current:/var/log/zeek:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - nids-net
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.0
+    container_name: nids-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - nids-net
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: nids-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./api:/app/api
+      - ./detection:/app/detection
+      - ./threat_intel:/app/threat_intel
+      - ./ml:/app/ml
+    networks:
+      - nids-net
+
+networks:
+  nids-net:
+    driver: bridge
+
+volumes:
+  es-data:
