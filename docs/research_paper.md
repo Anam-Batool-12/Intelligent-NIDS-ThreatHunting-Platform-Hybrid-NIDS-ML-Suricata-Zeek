@@ -116,7 +116,22 @@ writing to daily-rotated Elasticsearch indices (`nids-alerts-*`,
 `nids-conn-*`). Kibana data views were created on top of both indices for
 interactive exploration.
 
-### 5.4 Python Detection Modules — ⬜ Not started
+### 5.4 Python Detection Modules — ✅ Complete
+Five Python detectors were implemented to catch attack patterns that fall
+below Suricata's short (5-60 second) threshold windows, or to add
+confidence scoring on top of Suricata's own alerts. Three query Zeek's
+connection data over longer windows: a slow port scan detector (distinct
+destination ports per source IP over 5 minutes), a brute force detector
+(repeated attempts to login ports 22/21/3389 over 5 minutes), and a DoS
+detector (total connection volume per source IP over 2 minutes). Two
+detectors instead re-query Suricata's own alert index to distinguish
+one-off false positives from confirmed, repeated attack behavior: an SQL
+injection confirmation detector and a DNS tunneling confirmation detector,
+both flagging a source IP once it triggers the corresponding Suricata rule
+3 or more times within a 10-minute window. All detectors write their
+findings into a dedicated `nids-python-alerts` Elasticsearch index, kept
+separate from Suricata's alerts so each detection's originating engine
+remains traceable — relevant for the evaluation in Section 6.4.
 
 ### 5.5 ML Anomaly Detection — ⬜ Not started
 

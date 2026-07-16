@@ -22,7 +22,7 @@ Network Traffic
 ## Lab Topology
 
 | Host    | Hypervisor        | Role     | Network Mode | IP (example)      |
-|---------|-------------------|----------|---------------|--------------------|
+|---------|--------------------|----------|--------------|--------------------|
 | Kali    | VMware Workstation | Sensor   | Bridged (`eth0`) | `192.168.100.x` |
 | Debian  | VirtualBox         | Attacker | Bridged      | `192.168.100.x`   |
 
@@ -49,11 +49,12 @@ WiFi adapter).
 | Zeek (protocol logging) | ✅ Done | Deployed via zeekctl, custom DNS tunneling script active, scan detection verified in `conn.log` |
 | Logstash → Elasticsearch pipeline | ✅ Done | Both Suricata `eve.json` and Zeek `conn.log` flowing into Elasticsearch |
 | Kibana Dashboard | ✅ Done | Data views created (`nids-alerts`, `nids-conn`), verified searchable (51K+ alert docs, 270 custom-rule alerts) |
-| Python detection modules | ⬜ Skeleton only | `detection/*.py` — not yet implemented |
+| Python detection modules | ✅ Done | 5 detectors implemented and tested: slow port scan, brute force, DoS, SQLi confirmation, DNS tunneling confirmation |
 | ML anomaly detection | ⬜ Not started | `ml/*.py` |
 | Threat intel enrichment | ⬜ Not started | `threat_intel/enrich.py` |
 | FastAPI (alerts/timeline/stats) | ⬜ Skeleton only | `api/` |
 | Custom dashboard (beyond Kibana) | ⬜ Not started | |
+| Automatic scheduling (cron) | ⬜ Not started | detectors currently run manually |
 
 ## Suricata Setup (Completed)
 
@@ -85,7 +86,7 @@ sudo suricata -T -c /etc/suricata/suricata.yaml -v
 
 # Restart after config/rule changes
 sudo systemctl restart suricata
-sudo systemctl enable suricata   # ensure it survives reboot
+sudo systemctl enable suricata  # ensure it survives reboot
 
 # Watch alerts live
 sudo tail -f /var/log/suricata/fast.log
@@ -124,7 +125,7 @@ correlating with Suricata alerts via Community ID).
 ### Useful commands
 ```bash
 sudo /opt/zeek/bin/zeekctl status
-sudo /opt/zeek/bin/zeekctl deploy     # re-apply config after changes
+sudo /opt/zeek/bin/zeekctl deploy    # re-apply config after changes
 sudo tail -f /opt/zeek/logs/current/conn.log
 ```
 
@@ -178,11 +179,69 @@ docker compose logs logstash --tail 60
 curl -s "http://localhost:9200/_cat/indices?v" | grep nids
 ```
 
+## Python Detection Modules (Completed)
+
+### Purpose
+Suricata's custom rules use short (5-60 second) threshold windows to stay
+fast and memory-efficient. An attacker who spreads an attack out over
+several minutes can stay under those thresholds indefinitely. The Python
+detection modules close this gap by querying data already stored in
+Elasticsearch over longer windows, and by cross-referencing repeated
+Suricata alerts to separate one-off false positives from confirmed,
+repeated attack behavior.
+
+### Design
+All five detectors share the same simple structure (deliberately written
+with basic loops and dictionaries rather than Elasticsearch aggregation
+queries, so the logic is easy to read and explain):
+1. Query Elasticsearch for recent records (either Zeek's `nids-conn-*` or
+   Suricata's `nids-alerts-*`, depending on the detector).
+2. Loop through results, building a Python dictionary that counts
+   occurrences per source IP (or per IP+port).
+3. Compare each count against a threshold constant.
+4. If crossed, print an alert and write a new document into a dedicated
+   `nids-python-alerts` Elasticsearch index (kept separate from Suricata's
+   own alerts so the source of each detection is always traceable).
+
+### The five detectors
+
+| Detector | Data source | Logic |
+|---|---|---|
+| `portscan_detector.py` | `nids-conn-*` (Zeek) | Counts distinct destination ports touched by each source IP over a 5-minute window; flags 15+ |
+| `bruteforce_detector.py` | `nids-conn-*` (Zeek) | Counts connection attempts to login ports (22/SSH, 21/FTP, 3389/RDP) per source IP over 5 minutes; flags 10+ |
+| `dos_detector.py` | `nids-conn-*` (Zeek) | Counts total connections per source IP over a 2-minute window (short, since DoS is fast); flags 100+ |
+| `sqli_detector.py` | `nids-alerts-*` (Suricata) | Counts how many times each source IP triggered a Suricata SQLi rule over 10 minutes; flags 3+ as "confirmed" rather than a one-off false positive |
+| `dns_tunnel_detector.py` | `nids-alerts-*` (Suricata) | Same confirmation pattern as SQLi, applied to Suricata's DNS tunneling rules |
+
+**Why SQLi and DNS tunneling detectors read from Suricata's alerts rather
+than raw traffic:** Zeek's `conn.log` (the only Zeek log currently ingested
+into Elasticsearch) contains connection metadata only — no HTTP URIs or DNS
+query strings. Extending the pipeline to ingest `http.log` and `dns.log`
+would allow payload-level Python detection for these two attack types; for
+now, these two detectors add value by turning Suricata's single alerts into
+a confidence-scored "this happened repeatedly" signal, which is itself a
+common real-world SOC technique for reducing alert fatigue.
+
+### Environment
+Detectors run inside a Python virtual environment (`venv/`) with the
+`elasticsearch==8.14.0` client pinned to match the deployed Elasticsearch
+server version (the latest client on PyPI, v9.x, is not guaranteed
+compatible with an 8.x server).
+
+### Verification
+All five scripts were run manually against live data and completed without
+errors ("Scan complete."). Full detection-accuracy evaluation (precision/
+recall against labeled traffic) is planned once cron scheduling and the
+benchmark dataset evaluation (Section 6.4 of the paper) are in place.
+
 ## Next Steps
-1. Implement Python detection modules that read from Elasticsearch and
-   apply logic Suricata's static rules can't (e.g., slow/low-rate scans).
+1. Schedule the five Python detectors to run automatically via cron
+   (e.g., every 2 minutes) instead of manual execution.
 2. Train and integrate the ML anomaly detection model on Zeek connection
    features.
 3. Build the FastAPI alert/timeline endpoints.
 4. Build a custom dashboard/frontend beyond raw Kibana Discover views
    (or curate saved Kibana visualizations for the final deliverable).
+5. (Optional) Extend the Logstash pipeline to ingest Zeek's `http.log` and
+   `dns.log`, enabling payload-level Python detection for SQLi/DNS
+   tunneling instead of the current Suricata-alert-correlation approach.
