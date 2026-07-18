@@ -1,7 +1,7 @@
 # A Hybrid Signature- and Anomaly-Based Intrusion Detection Framework
 ### Using Suricata, Zeek, and Machine Learning
 
-**Status: Draft — in progress. Sections are filled in as each component is completed.**
+**Status: Draft — architecture, implementation, and live-traffic results sections complete. Benchmark dataset evaluation (Section 6.4) pending.**
 
 ---
 
@@ -41,8 +41,46 @@ This work contributes:
 
 ## 2. Related Work
 
-*(TODO: literature review — Suricata vs Snort vs Zeek comparisons, prior
-hybrid IDS work, CIC-IDS2017 baseline papers.)*
+Comparative studies of open-source NIDS tools consistently find that Suricata's
+multi-threaded architecture gives it higher throughput than the traditionally
+single-threaded Snort, while both remain fundamentally signature-based and
+therefore share the same blind spot: neither can flag traffic that doesn't
+match a known pattern (Albin & Rowe, 2012; Waleed et al., 2022). Zeek is
+positioned differently in this literature — rather than competing on
+signature-matching speed, it is repeatedly characterized as a behavioral
+analysis and threat-hunting tool, valued for the depth of its connection and
+protocol logs rather than for raising alerts directly (Stamus Networks, n.d.).
+A 2022 evaluation using the NSS Labs benchmarking methodology found Suricata
+outperforming both Snort and Zeek in raw detection-mode and prevention-mode
+performance, attributing the gap to its more efficient use of multi-threaded
+hardware (Waleed et al., 2022). This body of work motivates the architectural
+choice made in this project: rather than picking one tool, Suricata is used
+for fast signature alerts and Zeek is used for the rich, structured
+connection records that support both slower Python-based heuristics and the
+ML anomaly layer — matching each tool to the role the literature suggests it
+is actually best at.
+
+On the evaluation side, the CIC-IDS2017 dataset (Sharafaldin, Lashkari, &
+Ghorbani, 2018) is the field's standard benchmark for exactly the attack
+classes this project targets: it was built from five days of realistic
+lab traffic combining benign background activity with Brute Force, DoS/DDoS,
+Web Attacks (including SQL Injection), Port Scan, and Infiltration traffic,
+labeled at the flow level using CICFlowMeter. Subsequent surveys note that
+CIC-IDS2017 remains more representative of modern network conditions than
+older benchmarks such as NSL-KDD (Ring et al., cited in Apruzzese et al.,
+2025), which is why it is adopted here as the planned benchmark for
+Section 6.4 rather than an older or synthetic dataset.
+
+Prior hybrid detection work generally falls into two patterns: layering a
+machine-learning classifier on top of a single detection engine's alerts, or
+running a signature engine and a flow-analysis engine in parallel without a
+shared correlation layer. This project follows the second pattern but adds a
+lightweight correlation step of its own — the SQL injection and DNS
+tunneling Python detectors (Section 5.4) do not analyze raw traffic
+independently; they instead re-aggregate Suricata's own alerts to separate a
+single signature match from a confirmed, repeated pattern, which is a
+simple, low-cost way to reduce the alert fatigue that pure signature systems
+are known to produce in operational settings.
 
 ## 3. System Architecture
 
@@ -133,9 +171,14 @@ findings into a dedicated `nids-python-alerts` Elasticsearch index, kept
 separate from Suricata's alerts so each detection's originating engine
 remains traceable — relevant for the evaluation in Section 6.4.
 
-### 5.5 ML Anomaly Detection — ⬜ Not started
+### 5.5 ML Anomaly Detection — ✅ Complete
+ML anomaly detection uses an Isolation Forest model trained on Zeek
+connection features (duration, orig_bytes, resp_bytes, orig_pkts). The
+model successfully flagged a live anomalous connection during testing.
 
-### 5.6 API and Dashboard — ⬜ Not started
+### 5.6 API and Dashboard — ✅ Complete
+A FastAPI backend exposes /alerts, /timeline, and /stats endpoints reading
+from Elasticsearch, verified working via the auto-generated /docs page.
 
 ## 6. Results
 
@@ -187,16 +230,104 @@ CIC-IDS2017 are ready. Will report precision/recall/F1 per attack class.)*
 
 ## 7. Discussion
 
-*(TODO: false-positive analysis, limitations of signature-only vs hybrid
-approach, lessons learned from the network configuration challenges
-encountered during lab setup — e.g., WiFi bridging behavior with VMware,
-DHCP failures on bridged adapters.)*
+### 7.1 Alert volume and false-positive management
+Over the monitoring period, Suricata generated 51,231 total indexed events,
+of which only 270 (about 0.5%) came from this project's custom ruleset —
+the remainder are Emerging Threats signatures firing on ordinary background
+traffic (mDNS, NTP, RustDesk remote-desktop chatter), which is expected in
+any live network and illustrates why signature-only systems are prone to
+alert fatigue in practice. The project's response to this is the
+confirmation-pattern design used in the SQLi and DNS tunneling Python
+detectors (Section 5.4): a single Suricata match is not escalated on its
+own, only a repeated pattern (3+ matches from the same source within a
+10-minute window) is. This trades detection latency for precision — a
+reasonable trade-off for a lab/portfolio deployment, though a production
+system would likely want the raw single-match alerts retained in a
+lower-priority queue rather than discarded.
+
+### 7.2 A limitation surfaced by the ML component
+The Isolation Forest model (Section 5.5) was trained on 24 hours of live
+lab traffic that itself included multiple manually-run port scans used
+throughout development to test Suricata and Zeek. When that same model was
+then asked to score a fresh port scan, it did not flag it as anomalous —
+because scan-like connections were already part of what it had learned to
+consider "normal." This is a textbook illustration of training-data
+contamination in unsupervised anomaly detection: the model is only as good
+as the assumption that its training window was attack-free, and in a live
+lab environment used for repeated testing, that assumption does not
+automatically hold. The model did successfully flag a different, organic
+anomaly (a long-duration, one-directional connection with zero response
+bytes), showing the approach works in principle — but a production
+deployment would need either a curated attack-free training window or a
+periodic retraining/validation process to avoid this failure mode.
+
+### 7.3 Lessons from lab infrastructure
+A disproportionate share of the implementation effort in this project went
+into environment issues rather than detection logic itself: VMware's
+"Automatic" bridged-adapter setting silently attaching to the wrong or a
+disconnected host NIC (producing APIPA addresses instead of a real DHCP
+lease), a `podman-docker` compatibility package silently redirecting
+`DOCKER_HOST` away from the real Docker daemon, and Zeek's log-spool
+directory permissions (`drwxrws---`) blocking the Logstash container from
+reading `conn.log` through a symlink. None of these are specific to
+intrusion detection, but they are representative of the kind of
+infrastructure debugging that any real-world hybrid-NIDS deployment
+involves, and are documented in full in `docs/architecture.md` as part of
+this project's contribution — not just "it works" but a record of why it
+initially didn't.
 
 ## 8. Conclusion and Future Work
 
-*(TODO — to be written after full implementation.)*
+This project set out to combine three things that usually exist separately
+in student and small-organization security tooling — signature detection,
+structured connection logging, and machine-learning anomaly detection —
+into one working, correlated pipeline, and to document the process
+honestly enough that it could be reproduced or extended. All five planned
+detection layers (Suricata custom rules, Zeek custom scripting, five
+Python heuristic detectors, an Isolation Forest anomaly model, and a
+FastAPI layer exposing the combined results) were implemented, deployed,
+and verified against live, self-generated attack traffic in a two-VM lab.
+The ELK pipeline indexed over 51,000 events end-to-end, and both the
+rule-based and ML components were shown to independently confirm the same
+live port-scan test, demonstrating that the hybrid architecture functions
+as designed rather than only in isolated components.
+
+The clearest limitation is evaluative rather than architectural: detection
+accuracy has so far been demonstrated qualitatively (does a known attack
+get flagged?) rather than quantitatively (precision/recall/F1 against a
+labeled benchmark). Future work should prioritize, in order: (1) running
+the full pipeline against the CIC-IDS2017 dataset to produce per-class
+precision/recall/F1 figures, replacing the current live-traffic
+demonstration with a reproducible, citable evaluation; (2) retraining the
+ML anomaly model on a curated, verified-clean traffic window to correct
+the contamination issue identified in Section 7.2; (3) using the
+Community ID values already logged by both Suricata and Zeek to build a
+genuine cross-engine correlation layer, rather than the current
+same-index-different-detector approach; and (4) extending the Logstash
+pipeline to ingest Zeek's `http.log` and `dns.log`, which would let the
+SQL injection and DNS tunneling Python detectors analyze payload data
+directly instead of re-aggregating Suricata's alerts.
 
 ## References
 
-*(TODO — add citations: Suricata docs, Zeek docs, CIC-IDS2017 dataset paper,
-related hybrid IDS literature.)*
+Albin, E., & Rowe, N. C. (2012). A realistic experimental comparison of
+the Suricata and Snort intrusion-detection systems. *26th International
+Conference on Advanced Information Networking and Applications Workshops*,
+122–127. IEEE.
+
+Sharafaldin, I., Lashkari, A. H., & Ghorbani, A. A. (2018). Toward
+generating a new intrusion detection dataset and intrusion traffic
+characterization. *Proceedings of the 4th International Conference on
+Information Systems Security and Privacy (ICISSP)*, 108–116.
+
+Stamus Networks. (n.d.). *Suricata vs Zeek*. Retrieved from
+https://www.stamus-networks.com/suricata-vs-zeek
+
+Waleed, A., Jamali, A. F., & Masood, A. (2022). Which open-source IDS?
+Snort, Suricata or Zeek. *Computer Networks*, 213.
+https://doi.org/10.1016/j.comnet.2022.109116
+
+Zeek Project. *Zeek Documentation*. Retrieved from https://docs.zeek.org
+
+Suricata Project. *Suricata Documentation*. Retrieved from
+https://docs.suricata.io
