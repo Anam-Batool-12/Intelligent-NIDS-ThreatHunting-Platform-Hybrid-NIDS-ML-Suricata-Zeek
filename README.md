@@ -57,8 +57,8 @@ v                              v            |
 | ML anomaly detection | Done |
 | Cron automation | Done |
 | FastAPI backend | Done |
-| Threat intel enrichment | Not started |
-| CIC-IDS2017 benchmark evaluation | Not started |
+| Threat intel enrichment | Future Work |
+| CIC-IDS2017 benchmark evaluation | Future Work |
 
 ## Tech Stack
 
